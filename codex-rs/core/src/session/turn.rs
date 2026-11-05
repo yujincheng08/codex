@@ -540,6 +540,7 @@ pub(crate) async fn run_turn(
 
     let mut next_step_context = Some(first_step_context);
     let mut guardian_budget_compacted = false;
+    let mut oversized_websocket_compacted = false;
     loop {
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
@@ -942,6 +943,47 @@ pub(crate) async fn run_turn(
                     /*candidate*/ None,
                 )
                 .await?;
+                can_drain_pending_input = false;
+                continue;
+            }
+            Err(err)
+                if auto_summarization_enabled
+                    && matches!(
+                        err.details(),
+                        CodexErrorDetails::WebsocketRequestTooLarge { .. }
+                    )
+                    && !oversized_websocket_compacted =>
+            {
+                // A token threshold cannot bound inline image bytes. Compact the full
+                // history over HTTP once, then retry normal sampling over WebSocket.
+                oversized_websocket_compacted = true;
+                sess.send_event(
+                    turn_context.as_ref(),
+                    EventMsg::Warning(WarningEvent {
+                        message: "Transport: HTTP (oversized WebSocket compaction)".to_string(),
+                    }),
+                )
+                .await;
+                client_session.set_http_only_compaction(true);
+                let result = run_auto_compact(
+                    &sess,
+                    Arc::clone(&step_context),
+                    Arc::clone(&step_context),
+                    &mut client_session,
+                    CompactionReason::ContextLimit,
+                    CompactionPhase::MidTurn,
+                    /*candidate*/ None,
+                )
+                .await;
+                client_session.set_http_only_compaction(false);
+                result?;
+                sess.send_event(
+                    turn_context.as_ref(),
+                    EventMsg::Warning(WarningEvent {
+                        message: "Transport: WS (compaction complete)".to_string(),
+                    }),
+                )
+                .await;
                 can_drain_pending_input = false;
                 continue;
             }
@@ -3025,6 +3067,15 @@ async fn try_run_sampling_request(
             return Err(error);
         }
     };
+    if let Some(transport) = client_session.take_stream_transport_change() {
+        sess.send_event(
+            turn_context.as_ref(),
+            EventMsg::Warning(WarningEvent {
+                message: format!("Transport: {transport}"),
+            }),
+        )
+        .await;
+    }
     let can_interrupt = turn_context
         .config
         .features
