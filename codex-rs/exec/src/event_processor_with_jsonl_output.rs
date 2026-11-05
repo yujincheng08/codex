@@ -442,9 +442,13 @@ impl EventProcessorWithJsonOutput {
                 CodexStatus::Running
             }
             ServerNotification::Warning(notification) => {
-                let warning = self.collect_warning(notification.message);
-                events.extend(warning.events);
-                warning.status
+                if notification.message.starts_with("Transport: ") {
+                    CodexStatus::Running
+                } else {
+                    let warning = self.collect_warning(notification.message);
+                    events.extend(warning.events);
+                    warning.status
+                }
             }
             ServerNotification::Error(notification) => {
                 let message = match notification.error.additional_details {

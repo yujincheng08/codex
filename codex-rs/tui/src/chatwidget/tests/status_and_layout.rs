@@ -376,6 +376,38 @@ async fn status_line_git_summary_items_render_values() {
 }
 
 #[tokio::test]
+async fn status_line_tracks_websocket_fallback_and_compaction_transport() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let status = crate::bottom_pane::StatusLineItem::Status;
+    assert!(
+        chat.status_line_value_for_item(status)
+            .unwrap()
+            .ends_with("?")
+    );
+
+    chat.on_warning("Transport: HTTP (oversized WebSocket compaction)");
+    assert!(
+        chat.status_line_value_for_item(status)
+            .unwrap()
+            .ends_with("HTTP")
+    );
+
+    chat.on_warning("Transport: WS (compaction complete)");
+    assert!(
+        chat.status_line_value_for_item(status)
+            .unwrap()
+            .ends_with("WS")
+    );
+
+    chat.on_warning("Falling back from WebSockets to HTTPS transport. broken pipe");
+    assert!(
+        chat.status_line_value_for_item(status)
+            .unwrap()
+            .ends_with("HTTP")
+    );
+}
+
+#[tokio::test]
 async fn raw_output_status_line_value_only_shows_when_enabled() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 

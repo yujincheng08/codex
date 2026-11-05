@@ -156,6 +156,7 @@ use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::extract_response_debug_context_from_api_error;
@@ -326,6 +327,10 @@ pub struct ModelClient {
 pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
+    /// Use HTTP for a one-off oversized compaction without changing sampling transport.
+    http_only_compaction: bool,
+    last_stream_transport: Option<&'static str>,
+    reported_stream_transport: Option<&'static str>,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -542,6 +547,10 @@ enum WebsocketStreamOutcome {
     FallbackToHttp,
 }
 
+// The ChatGPT Responses WebSocket endpoint closes logical messages above 16 MiB
+// with code 1009. Measure the complete serialized request, including metadata.
+const MAX_RESPONSES_WS_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+
 /// Result of opening a WebRTC Realtime call.
 ///
 /// The SDP answer goes back to the client. The call id and auth headers stay on the server so the
@@ -752,6 +761,9 @@ impl ModelClient {
         ModelClientSession {
             client: self.clone(),
             websocket_session,
+            http_only_compaction: false,
+            last_stream_transport: None,
+            reported_stream_transport: None,
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -1568,6 +1580,20 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
+    pub(crate) fn set_http_only_compaction(&mut self, enabled: bool) {
+        self.http_only_compaction = enabled;
+    }
+
+    pub(crate) fn take_stream_transport_change(&mut self) -> Option<&'static str> {
+        let current = self.last_stream_transport?;
+        if self.reported_stream_transport == Some(current) {
+            None
+        } else {
+            self.reported_stream_transport = Some(current);
+            Some(current)
+        }
+    }
+
     pub(crate) fn inference_tools_changed(&self, tools: &Arc<[ToolSpec]>) -> bool {
         let previous = self
             .client
@@ -2337,6 +2363,19 @@ impl ModelClientSession {
                 let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
                 payload.input = input;
             }
+            let serialized_bytes = serde_json::to_vec(&ws_request)?.len();
+            if provider.info().is_openai()
+                && client_setup
+                    .auth
+                    .as_ref()
+                    .is_some_and(CodexAuth::uses_codex_backend)
+                && serialized_bytes > MAX_RESPONSES_WS_REQUEST_BYTES
+            {
+                return Err(CodexErrorDetails::WebsocketRequestTooLarge {
+                    bytes: serialized_bytes,
+                }
+                .into());
+            }
             if !previous_response_id_from_untraced_warmup {
                 inference_trace_attempt.record_started(&ws_request);
             }
@@ -2496,6 +2535,15 @@ impl ModelClientSession {
                 self.try_switch_fallback_transport(session_telemetry, model_info);
                 Ok(())
             }
+            Err(err)
+                if matches!(
+                    err.details(),
+                    CodexErrorDetails::WebsocketRequestTooLarge { .. }
+                ) =>
+            {
+                // The turn loop compacts before its first sampling request.
+                Ok(())
+            }
             Err(err) => Err(err),
         }
     }
@@ -2523,7 +2571,7 @@ impl ModelClientSession {
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
-                if self.client.responses_websocket_enabled() {
+                if self.client.responses_websocket_enabled() && !self.http_only_compaction {
                     let request_trace = current_span_w3c_trace_context();
                     match self
                         .stream_responses_websocket(
@@ -2540,14 +2588,17 @@ impl ModelClientSession {
                         )
                         .await?
                     {
-                        WebsocketStreamOutcome::Stream(stream) => return Ok(stream),
+                        WebsocketStreamOutcome::Stream(stream) => {
+                            self.last_stream_transport = Some("WS");
+                            return Ok(stream);
+                        }
                         WebsocketStreamOutcome::FallbackToHttp => {
                             self.try_switch_fallback_transport(session_telemetry, model_info);
                         }
                     }
                 }
 
-                ResponsesHttpExecutor::new(&self.client)
+                let stream = ResponsesHttpExecutor::new(&self.client)
                     .stream_responses_http(
                         &self.turn_state,
                         /*expected_auth_owner*/ None,
@@ -2561,7 +2612,9 @@ impl ModelClientSession {
                         responses_metadata,
                         inference_trace,
                     )
-                    .await
+                    .await?;
+                self.last_stream_transport = Some("HTTP");
+                Ok(stream)
             }
         }
     }

@@ -766,7 +766,11 @@ impl ChatWidget {
                         format!("+{} -{}", stats.additions, stats.deletions)
                     }
                 }),
-            StatusLineItem::Status => Some(self.run_state_status_text()),
+            StatusLineItem::Status => Some(format!(
+                "{} · {}",
+                self.run_state_status_text(),
+                self.transport_status
+            )),
             StatusLineItem::Permissions => Some(permissions_display(&self.config)),
             StatusLineItem::ApprovalMode => Some(approval_mode_display(&self.config)),
             StatusLineItem::UsedTokens => {

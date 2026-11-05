@@ -126,6 +126,9 @@ pub enum CodexErrorDetails {
         "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
     )]
     ContextWindowExceeded,
+    /// The fully serialized Responses WebSocket message cannot fit in one message.
+    #[error("WebSocket request is {bytes} bytes, above the 16 MiB message limit")]
+    WebsocketRequestTooLarge { bytes: usize },
     #[error("no thread with id: {0}")]
     ThreadNotFound(ThreadId),
     #[error("agent thread limit reached")]
@@ -439,6 +442,7 @@ impl CodexErr {
             | CodexErrorDetails::Sandbox(_)
             | CodexErrorDetails::LandlockSandboxExecutableNotProvided
             | CodexErrorDetails::ContextWindowExceeded
+            | CodexErrorDetails::WebsocketRequestTooLarge { .. }
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. }
             | CodexErrorDetails::Spawn

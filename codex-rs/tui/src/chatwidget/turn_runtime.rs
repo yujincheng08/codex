@@ -585,6 +585,18 @@ impl ChatWidget {
 
     pub(super) fn on_warning(&mut self, message: impl Into<String>) {
         let message = message.into();
+        if message.starts_with("Falling back from WebSockets to HTTPS transport")
+            || message.starts_with("Transport: HTTP")
+        {
+            self.transport_status = "HTTP";
+            self.refresh_status_line();
+        } else if message.starts_with("Transport: WS") {
+            self.transport_status = "WS";
+            self.refresh_status_line();
+        }
+        if message.starts_with("Transport: ") {
+            return;
+        }
         if !self.warning_display_state.should_display(&message) {
             return;
         }

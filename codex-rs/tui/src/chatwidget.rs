@@ -757,6 +757,8 @@ pub(crate) struct ChatWidget {
     terminal_title_setup_original_items: Option<Option<Vec<String>>>,
     // Explicit per-thread layout choices made through `/title` and `/statusline`.
     status_surface_overrides: StatusSurfaceOverrides,
+    /// Last known inference transport for the current thread.
+    transport_status: &'static str,
     // Baseline instant used to animate spinner-prefixed title statuses.
     terminal_title_animation_origin: Instant,
     // The foreground loop refreshes the title at this deadline without drawing a frame.
