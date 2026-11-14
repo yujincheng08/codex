@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+exec /Users/shana/work/codex-ws-size-fix-0.169/dist/codex \
+  -c 'tui.status_line=["status","model-with-reasoning","current-dir","thread-name","model","reasoning"]' \
+  "$@"
