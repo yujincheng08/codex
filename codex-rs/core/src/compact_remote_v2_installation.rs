@@ -7,7 +7,75 @@ use crate::compact::build_compaction_replacement_history;
 use crate::context::world_state::split_prefix_updates;
 use crate::context_manager::updates::merge_world_state_updates;
 use crate::session::CompactedHistoryInstallation;
+use codex_context_fragments::AnnotatedContent;
+use codex_protocol::auth::AuthMode;
+use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::models::ImageReference;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
+
+// Leave room for runtime instructions, tools, and request metadata in the
+// 16 MiB ChatGPT Responses WebSocket message.
+const MAX_COMPACTED_HISTORY_WS_BYTES: usize = 12 * 1024 * 1024;
+const OMITTED_HISTORICAL_IMAGE: &str =
+    "[Historical image omitted after compaction to fit the WebSocket message limit]";
+
+fn compacted_history_bytes(history: &[ResponseItemEnvelope]) -> CodexResult<usize> {
+    let items = history
+        .iter()
+        .map(|envelope| &envelope.item)
+        .collect::<Vec<_>>();
+    Ok(serde_json::to_vec(&items)?.len())
+}
+
+/// Drop the largest older retained inline image after the compaction model has
+/// consumed the original history. Prefer retaining the newest image, and keep
+/// each message and its positional metadata aligned.
+fn trim_retained_images_for_websocket(history: &mut [ResponseItemEnvelope]) -> CodexResult<usize> {
+    let mut removed = 0;
+    while compacted_history_bytes(history)? > MAX_COMPACTED_HISTORY_WS_BYTES {
+        let mut images = Vec::new();
+        for (message_index, envelope) in history.iter().enumerate() {
+            let ResponseItem::Message { content, .. } = &envelope.item else {
+                continue;
+            };
+            for (content_index, part) in content.iter().enumerate() {
+                if let ContentItem::InputImage {
+                    image: ImageReference::Inline { image_url },
+                    ..
+                } = part
+                {
+                    images.push((message_index, content_index, image_url.len()));
+                }
+            }
+        }
+        let candidates = if images.len() > 1 {
+            &images[..images.len() - 1]
+        } else {
+            images.as_slice()
+        };
+        let Some(&(message_index, content_index, _)) =
+            candidates.iter().max_by_key(|(_, _, bytes)| bytes)
+        else {
+            break;
+        };
+        let envelope = &mut history[message_index];
+        let Some(mut content) = to_annotated_content(&mut envelope.item) else {
+            break;
+        };
+        content[content_index] = AnnotatedContent::text(
+            OMITTED_HISTORICAL_IMAGE,
+            ContentItemKind("user.text".to_string()),
+            ContentItemMetadata::harness(),
+        );
+        let _ = set_annotated_content(&mut envelope.item, content);
+        if let Some(metadata) = &mut envelope.metadata {
+            metadata.mark_retained_sources_incomplete();
+        }
+        removed += 1;
+    }
+    Ok(removed)
+}
 
 #[cfg(test)]
 #[path = "compact_remote_v2_installation_tests.rs"]
@@ -191,7 +259,7 @@ async fn build_and_install_compaction(
             .await?;
         analytics_details.active_context_tokens_before = Some(token_usage.input_tokens);
     }
-    let (compacted_history, retained_images) = build_v2_compacted_history(
+    let (mut compacted_history, retained_images) = build_v2_compacted_history(
         prompt_input,
         prompt_input_metadata,
         compaction_output,
@@ -203,6 +271,15 @@ async fn build_and_install_compaction(
         },
         crate::session::file_audio::snapshot(sess).await.as_ref(),
     );
+    let byte_budget_applies = turn_context.provider.info().is_openai()
+        && matches!(
+            sess.services.auth_manager.auth_mode(),
+            Some(AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens)
+        );
+    let mut omitted_images = 0;
+    if byte_budget_applies {
+        omitted_images += trim_retained_images_for_websocket(&mut compacted_history)?;
+    }
     let reviewer_compaction_hash = reviewer_compaction_hash(sess, turn_context).await;
     let installed = if let Some((prefix, model_info, cutoff_world_state)) = prefix {
         let (initial_context, world_state_baseline) = sess
@@ -235,13 +312,16 @@ async fn build_and_install_compaction(
         )
         .await
     } else {
-        let (new_history, world_state_baseline) = build_compaction_replacement_history(
+        let (mut new_history, world_state_baseline) = build_compaction_replacement_history(
             sess,
             replacement_step_context,
             world_state,
             compacted_history,
         )
         .await;
+        if byte_budget_applies {
+            omitted_images += trim_retained_images_for_websocket(&mut new_history)?;
+        }
         let (window_number, window_ids) = sess.advance_auto_compact_window().await;
         let installation = CompactedHistoryMetadata {
             input_goal_ids,
@@ -270,7 +350,18 @@ async fn build_and_install_compaction(
         analytics_details.cached_input_tokens = Some(token_usage.cached_input_tokens);
         analytics_details.cache_write_input_tokens = Some(token_usage.cache_write_input_tokens);
     }
-    analytics_details.retained_image_count = Some(retained_images);
+    analytics_details.retained_image_count = Some(retained_images.saturating_sub(omitted_images));
+    if omitted_images > 0 {
+        sess.send_event(
+            compaction_turn_context,
+            EventMsg::Warning(WarningEvent {
+                message: format!(
+                    "Compaction omitted {omitted_images} historical inline image(s) to keep WebSocket requests below the size limit"
+                ),
+            }),
+        )
+        .await;
+    }
     if let Some(trace_input_history) = trace_input_history.as_deref() {
         let replacement_history = sess
             .clone_history()

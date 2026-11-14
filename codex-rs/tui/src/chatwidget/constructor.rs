@@ -40,6 +40,11 @@ impl ChatWidget {
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
         config.model = model.clone();
+        let initial_transport = if config.model_provider_id == "openai" {
+            "WS"
+        } else {
+            "?"
+        };
         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
         let placeholder = PLACEHOLDER.to_string();
         let side_placeholder = SIDE_PLACEHOLDER.to_string();
@@ -280,7 +285,7 @@ impl ChatWidget {
             last_terminal_title_requires_action: false,
             terminal_title_setup_original_items: None,
             status_surface_overrides: StatusSurfaceOverrides::default(),
-            transport_status: "?",
+            transport_status: initial_transport,
             terminal_title_animation_origin: Instant::now(),
             terminal_title_next_refresh: None,
             status_line_project_root_name_cache: None,

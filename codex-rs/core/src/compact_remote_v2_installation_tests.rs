@@ -16,6 +16,56 @@ use test_case::test_case;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[test]
+fn compacted_history_drops_large_inline_image_until_websocket_request_fits() {
+    let first = format!("data:image/png;base64,{}", "A".repeat(9_500_000));
+    let second = format!("data:image/png;base64,{}", "B".repeat(9_300_000));
+    let message: ResponseItem = serde_json::from_value(serde_json::json!({
+        "type": "message", "role": "user",
+        "content": [
+            {"type": "input_text", "text": "Compare these images"},
+            {"type": "input_image", "image_url": first},
+            {"type": "input_image", "image_url": second}
+        ]
+    }))
+    .expect("user message with images");
+    let mut history = vec![ResponseItemEnvelope::new(message)];
+
+    assert_eq!(trim_retained_images_for_websocket(&mut history).unwrap(), 1);
+    assert!(compacted_history_bytes(&history).unwrap() < MAX_COMPACTED_HISTORY_WS_BYTES);
+    let ResponseItem::Message { content, .. } = &history[0].item else {
+        panic!("expected retained user message");
+    };
+    assert!(matches!(content[1], ContentItem::InputText { .. }));
+    assert!(matches!(content[2], ContentItem::InputImage { .. }));
+}
+
+#[test]
+fn compacted_history_keeps_small_older_and_newest_images_when_one_large_image_is_enough() {
+    let small = format!("data:image/png;base64,{}", "C".repeat(35_000));
+    let first_large = format!("data:image/png;base64,{}", "A".repeat(9_500_000));
+    let newest = format!("data:image/png;base64,{}", "B".repeat(9_300_000));
+    let message: ResponseItem = serde_json::from_value(serde_json::json!({
+        "type": "message", "role": "user",
+        "content": [
+            {"type": "input_image", "image_url": small},
+            {"type": "input_image", "image_url": first_large},
+            {"type": "input_image", "image_url": newest}
+        ]
+    }))
+    .expect("user message with images");
+    let mut history = vec![ResponseItemEnvelope::new(message)];
+
+    assert_eq!(trim_retained_images_for_websocket(&mut history).unwrap(), 1);
+    assert!(compacted_history_bytes(&history).unwrap() < MAX_COMPACTED_HISTORY_WS_BYTES);
+    let ResponseItem::Message { content, .. } = &history[0].item else {
+        panic!("expected retained user message");
+    };
+    assert!(matches!(content[0], ContentItem::InputImage { .. }));
+    assert!(matches!(content[1], ContentItem::InputText { .. }));
+    assert!(matches!(content[2], ContentItem::InputImage { .. }));
+}
+
 #[derive(Clone, Copy)]
 enum HistoryChange {
     Replacement,

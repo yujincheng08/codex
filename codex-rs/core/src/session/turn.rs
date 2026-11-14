@@ -1960,7 +1960,11 @@ async fn run_sampling_request(
         Arc::clone(&step_context),
         Arc::clone(&turn_diff_tracker),
     );
-    let max_retries = turn_context.provider.info().stream_max_retries();
+    let max_retries = if client_session.ws_recovery_probe() {
+        0
+    } else {
+        turn_context.provider.info().stream_max_retries()
+    };
     let incremental_tools = sess
         .current_window_uses_incremental_tools(&step_context)
         .await;
@@ -2064,6 +2068,7 @@ async fn run_sampling_request(
         .await
         {
             Ok(output) => {
+                client_session.clear_ws_recovery_probe();
                 return Ok((output, notify_messages));
             }
             Err(err) => match err.details() {
@@ -3036,7 +3041,7 @@ async fn try_run_sampling_request(
     };
     let mut resampling = crate::guardian::ResponseResampling::new(&sess);
     let mut stream_request = async |prompt: &Prompt| {
-        client_session
+        let result = client_session
             .stream(
                 prompt,
                 &step_context.settings.model_info,
@@ -3048,7 +3053,19 @@ async fn try_run_sampling_request(
                 &inference_trace,
             )
             .instrument(trace_span!("stream_request"))
-            .await
+            .await;
+        if result.is_ok()
+            && let Some(transport) = client_session.take_stream_transport_change()
+        {
+            sess.send_event(
+                turn_context.as_ref(),
+                EventMsg::Warning(WarningEvent {
+                    message: format!("Transport: {transport}"),
+                }),
+            )
+            .await;
+        }
+        result
     };
     let stream = stream_request(&prompt)
         .or_cancel(&cancellation_token)
@@ -3067,15 +3084,6 @@ async fn try_run_sampling_request(
             return Err(error);
         }
     };
-    if let Some(transport) = client_session.take_stream_transport_change() {
-        sess.send_event(
-            turn_context.as_ref(),
-            EventMsg::Warning(WarningEvent {
-                message: format!("Transport: {transport}"),
-            }),
-        )
-        .await;
-    }
     let can_interrupt = turn_context
         .config
         .features

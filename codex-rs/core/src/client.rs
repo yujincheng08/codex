@@ -334,6 +334,8 @@ pub struct ModelClientSession {
     http_only_compaction: bool,
     last_stream_transport: Option<&'static str>,
     reported_stream_transport: Option<&'static str>,
+    /// Limit the first WebSocket recovery attempt after an HTTP fallback.
+    ws_recovery_probe: bool,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -754,6 +756,7 @@ impl ModelClient {
     /// This constructor does not perform network I/O itself; the session opens a websocket lazily
     /// when the first stream request is issued.
     pub fn new_session(&self) -> ModelClientSession {
+        let recovering_websocket = self.reset_http_fallback_for_new_turn();
         let auth_owner = self.auth_owner();
         let mut websocket_session = self.take_cached_websocket_session();
         if websocket_session.auth_owner != auth_owner {
@@ -767,8 +770,15 @@ impl ModelClient {
             http_only_compaction: false,
             last_stream_transport: None,
             reported_stream_transport: None,
+            ws_recovery_probe: recovering_websocket,
             turn_state: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Retry WebSocket on the next turn after a session-level HTTP fallback.
+    /// The caller limits that recovery turn to one WebSocket attempt.
+    pub(crate) fn reset_http_fallback_for_new_turn(&self) -> bool {
+        self.state.disable_websockets.swap(false, Ordering::Relaxed)
     }
 
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
@@ -1613,6 +1623,14 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
+    pub(crate) fn ws_recovery_probe(&self) -> bool {
+        self.ws_recovery_probe
+    }
+
+    pub(crate) fn clear_ws_recovery_probe(&mut self) {
+        self.ws_recovery_probe = false;
+    }
+
     pub(crate) fn set_http_only_compaction(&mut self, enabled: bool) {
         self.http_only_compaction = enabled;
     }
@@ -2581,7 +2599,9 @@ impl ModelClientSession {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<()> {
-        if !self.client.responses_websocket_enabled() {
+        // The first real request makes the single recovery attempt. A
+        // speculative prewarm must not spend that turn's retry budget.
+        if self.ws_recovery_probe || !self.client.responses_websocket_enabled() {
             return Ok(());
         }
         if self.is_websocket_prewarmed().await {

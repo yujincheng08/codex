@@ -281,7 +281,12 @@ impl ChatWidget {
                 ]);
             }
             ServerNotification::Warning(notification) => {
-                if self.warning_display_state.startup_complete {
+                if self.warning_display_state.startup_complete
+                    || notification.message.starts_with("Transport: ")
+                    || notification
+                        .message
+                        .starts_with("Falling back from WebSockets to HTTPS transport")
+                {
                     self.on_warning(notification.message);
                 } else if self
                     .warning_display_state

@@ -253,7 +253,7 @@ async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn websocket_fallback_is_sticky_across_turns() -> Result<()> {
+async fn websocket_fallback_retries_once_on_next_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -291,11 +291,10 @@ async fn websocket_fallback_is_sticky_across_turns() -> Result<()> {
         .filter(|req| req.method == Method::POST && req.url.path().ends_with("/responses"))
         .count();
 
-    // WebSocket attempts all happen on the first turn:
-    // 1 deferred request prewarm attempt (startup) + 3 stream attempts
-    // (initial try + 2 retries) before fallback.
-    // Fallback is sticky, so the second turn stays on HTTP and adds no websocket attempts.
-    assert_eq!(websocket_attempts, 4);
+    // The first turn uses one prewarm and three stream attempts before HTTP
+    // fallback. The next turn probes WebSocket once, then uses HTTP promptly
+    // when the server still cannot upgrade.
+    assert_eq!(websocket_attempts, 5);
     assert_eq!(http_attempts, 2);
     assert_eq!(response_mock.requests().len(), 2);
 

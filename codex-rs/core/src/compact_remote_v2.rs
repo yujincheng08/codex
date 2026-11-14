@@ -62,6 +62,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TruncationPolicy;
+use codex_protocol::protocol::WarningEvent;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
@@ -149,24 +150,44 @@ pub(crate) async fn run_remote_compact_task(
     step_context: Arc<StepContext>,
     world_state: Arc<WorldState>,
 ) -> CodexResult<()> {
+    // Standalone compaction may be the recovery path for an already oversized
+    // WebSocket window. Keep it on HTTP without changing later sampling turns.
+    let mut client_session = sess.services.model_client.new_session();
+    client_session.set_http_only_compaction(true);
+    sess.send_event(
+        step_context.turn.as_ref(),
+        EventMsg::Warning(WarningEvent {
+            message: "Transport: HTTP (manual compaction)".to_string(),
+        }),
+    )
+    .await;
     let compaction_metadata = CompactionTurnMetadata::new(
         CompactionTrigger::Manual,
         CompactionReason::UserRequested,
         CompactionImplementation::ResponsesCompactionV2,
         CompactionPhase::StandaloneTurn,
     );
-    run_remote_compact_task_inner(
+    let result = run_remote_compact_task_inner(
         &sess,
         &step_context,
         &step_context,
-        /*client_session*/ None,
+        Some(&mut client_session),
         world_state,
         compaction_metadata,
         /*candidate*/ None,
         CompactionFallback::Foreground,
     )
-    .await
-    .map(|_| ())
+    .await;
+    if result.is_ok() {
+        sess.send_event(
+            step_context.turn.as_ref(),
+            EventMsg::Warning(WarningEvent {
+                message: "Transport: WS (manual compaction complete)".to_string(),
+            }),
+        )
+        .await;
+    }
+    result.map(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]

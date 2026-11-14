@@ -491,7 +491,7 @@ async fn status_line_tracks_websocket_fallback_and_compaction_transport() {
     assert!(
         chat.status_line_value_for_item(status)
             .unwrap()
-            .ends_with("?")
+            .ends_with("WS")
     );
 
     chat.on_warning("Transport: HTTP (oversized WebSocket compaction)");
