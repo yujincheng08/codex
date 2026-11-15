@@ -663,8 +663,15 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     mailbox_preempted,
+                    model_response_completed,
                     last_agent_message: sampling_request_last_agent_message,
                 } = sampling_request_output;
+                // A long turn can grow past the WebSocket byte limit again after
+                // another completed model response. Keep the guard set across
+                // preemption so an ineffective compaction cannot loop.
+                if model_response_completed {
+                    oversized_websocket_compacted = false;
+                }
                 if model_needs_follow_up {
                     sess.input_queue
                         .accept_mailbox_delivery_for_current_turn(
@@ -2127,6 +2134,7 @@ async fn run_sampling_request(
                 SamplingRequestResult {
                     needs_follow_up: true,
                     mailbox_preempted: draining_for_mailbox,
+                    model_response_completed: false,
                     last_agent_message: None,
                 },
                 notify_messages,
@@ -2278,6 +2286,8 @@ struct SamplingRequestResult {
     needs_follow_up: bool,
     /// Queued mail interrupted sampling and must be drained before the next request.
     mailbox_preempted: bool,
+    /// A response.completed event was received, even if the model requested tools.
+    model_response_completed: bool,
     last_agent_message: Option<String>,
 }
 
@@ -3130,6 +3140,7 @@ async fn try_run_sampling_request(
             break Ok(SamplingRequestResult {
                 needs_follow_up,
                 mailbox_preempted: *draining_for_mailbox,
+                model_response_completed: true,
                 last_agent_message,
             });
         }
@@ -3183,6 +3194,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up: true,
                     mailbox_preempted: false,
+                    model_response_completed: false,
                     last_agent_message,
                 });
             }
@@ -3223,6 +3235,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         mailbox_preempted: true,
+                        model_response_completed: false,
                         last_agent_message,
                     });
                 }
@@ -3432,6 +3445,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         mailbox_preempted: true,
+                        model_response_completed: false,
                         last_agent_message,
                     });
                 }
